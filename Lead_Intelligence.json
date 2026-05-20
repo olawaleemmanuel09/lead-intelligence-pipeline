@@ -1,0 +1,922 @@
+{
+  "name": "Lead Intelligence \u2014 Google Maps + Yelp Discovery",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "1a000000-0000-0000-0000-000000000001",
+      "name": "Daily Trigger 09:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1600,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "APIFY_ACTOR_GMAPS",
+              "value": "compass~crawler-google-places"
+            },
+            {
+              "name": "APIFY_ACTOR_YELP",
+              "value": "yin~yelp-scraper"
+            },
+            {
+              "name": "GOOGLE_SHEET_ID",
+              "value": "REPLACE_WITH_YOUR_SHEET_ID"
+            },
+            {
+              "name": "TELEGRAM_CHAT_ID",
+              "value": "REPLACE_WITH_YOUR_CHAT_ID"
+            },
+            {
+              "name": "ANTHROPIC_MODEL",
+              "value": "claude-haiku-4-5"
+            }
+          ],
+          "number": [
+            {
+              "name": "MAX_RESULTS_PER_QUERY",
+              "value": 40
+            },
+            {
+              "name": "HIGH_SCORE_THRESHOLD",
+              "value": 8
+            },
+            {
+              "name": "MEDIUM_SCORE_THRESHOLD",
+              "value": 5
+            }
+          ]
+        }
+      },
+      "id": "1a000000-0000-0000-0000-000000000002",
+      "name": "Set Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        -1400,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Search seeds: category \u00d7 city. Edit this list to control discovery scope.\n// Each daily run will pick a rotating subset to spread quota and avoid hammering one query.\nconst seeds = [\n  { category: 'barber',      query: 'barber shop',           city: 'Atlanta, GA' },\n  { category: 'barber',      query: 'barber shop',           city: 'Houston, TX' },\n  { category: 'hair_salon',  query: 'hair salon',            city: 'Phoenix, AZ' },\n  { category: 'nail_salon',  query: 'nail salon',            city: 'Miami, FL' },\n  { category: 'med_spa',     query: 'med spa',               city: 'Dallas, TX' },\n  { category: 'realtor',     query: 'real estate agent',     city: 'Austin, TX' },\n  { category: 'plumber',     query: 'plumber',               city: 'Charlotte, NC' },\n  { category: 'home_service',query: 'hvac contractor',       city: 'Tampa, FL' },\n  { category: 'restaurant',  query: 'family restaurant',     city: 'Nashville, TN' },\n  { category: 'barber',      query: 'barber shop',           city: 'Las Vegas, NV' },\n  { category: 'nail_salon',  query: 'nail salon',            city: 'Denver, CO' },\n  { category: 'med_spa',     query: 'med spa',               city: 'San Diego, CA' }\n];\n\n// Rotate: pick 3 seeds per run, advancing daily so we cover all seeds across days.\nconst dayIndex = Math.floor(Date.now() / (1000 * 60 * 60 * 24));\nconst BATCH_SIZE = 3;\nconst start = (dayIndex * BATCH_SIZE) % seeds.length;\nconst todaysSeeds = [];\nfor (let i = 0; i < BATCH_SIZE; i++) {\n  todaysSeeds.push(seeds[(start + i) % seeds.length]);\n}\n\nreturn todaysSeeds.map(s => ({ json: s }));"
+      },
+      "id": "1a000000-0000-0000-0000-000000000003",
+      "name": "Build Search Seeds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1200,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.apify.com/v2/acts/{{ $('Set Config').item.json.APIFY_ACTOR_GMAPS }}/run-sync-get-dataset-items",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "timeout",
+              "value": "300"
+            },
+            {
+              "name": "memory",
+              "value": "4096"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"searchStringsArray\": [\"{{ $json.query }}\"],\n  \"locationQuery\": \"{{ $json.city }}\",\n  \"maxCrawledPlacesPerSearch\": {{ $('Set Config').item.json.MAX_RESULTS_PER_QUERY }},\n  \"language\": \"en\",\n  \"countryCode\": \"us\",\n  \"includeWebResults\": false,\n  \"scrapeContacts\": true,\n  \"skipClosedPlaces\": true\n}",
+        "options": {
+          "timeout": 600000,
+          "retry": {
+            "maxTries": 3,
+            "waitBetweenTries": 5000
+          }
+        }
+      },
+      "id": "1a000000-0000-0000-0000-000000000004",
+      "name": "Apify \u2014 Google Maps Scrape",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1000,
+        400
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "{{YOUR_CREDENTIAL_ID}}",
+          "name": "YOUR_HTTPHEADERAUTH_CREDENTIAL"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tag each scraped item with the seed's category and source, then split the array.\nconst seed = $('Build Search Seeds').item.json;\nconst items = $input.first().json;\nconst arr = Array.isArray(items) ? items : (items?.data || []);\n\nreturn arr.map(place => ({\n  json: {\n    source: 'google_maps',\n    category: seed.category,\n    search_city: seed.city,\n    raw: place\n  }\n}));"
+      },
+      "id": "1a000000-0000-0000-0000-000000000005",
+      "name": "Tag + Split Maps Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -800,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize Apify Google Maps payload into the canonical lead schema.\n// Reference field names from compass/crawler-google-places dataset items.\nconst inputs = $input.all();\nconst out = [];\n\nfor (const item of inputs) {\n  const r = item.json.raw || {};\n\n  // Extract phone \u2014 Apify returns `phone` or `phoneUnformatted`.\n  const phone = r.phoneUnformatted || r.phone || null;\n\n  // Extract email if scrapeContacts was on \u2014 comes back in `emails` array.\n  const email = Array.isArray(r.emails) && r.emails.length ? r.emails[0] : null;\n\n  // Booking method heuristic from website + categories + title.\n  const website = r.website || null;\n  const title = (r.title || '').toLowerCase();\n  const categoriesArr = (r.categories || []).map(c => (c || '').toLowerCase());\n\n  // Canonical lead object.\n  const lead = {\n    lead_id: `${item.json.source}_${r.placeId || r.fid || crypto.randomUUID()}`,\n    timestamp_discovered: new Date().toISOString(),\n    source: item.json.source,\n    category: item.json.category,\n    business_name: r.title || null,\n    website,\n    phone,\n    email,\n    address: r.address || null,\n    city: r.city || item.json.search_city.split(',')[0].trim(),\n    state: r.state || (item.json.search_city.split(',')[1] || '').trim(),\n    postal_code: r.postalCode || null,\n    latitude: r.location?.lat ?? null,\n    longitude: r.location?.lng ?? null,\n    rating: r.totalScore ?? null,\n    reviews_count: r.reviewsCount ?? null,\n    google_maps_url: r.url || null,\n    place_id: r.placeId || null,\n    categories_detected: categoriesArr,\n    permanently_closed: !!r.permanentlyClosed,\n    temporarily_closed: !!r.temporarilyClosed,\n    opening_hours: r.openingHours || null,\n    // Raw scraped subset retained for the AI qualification stage:\n    description: r.description || null,\n    additional_info: r.additionalInfo || null\n  };\n\n  // Skip dead listings.\n  if (lead.permanently_closed) continue;\n  if (!lead.business_name) continue;\n\n  out.push({ json: lead });\n}\n\nreturn out;"
+      },
+      "id": "1a000000-0000-0000-0000-000000000006",
+      "name": "Normalize \u2192 Lead Schema",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -600,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "lookup",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Set Config').item.json.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "leads",
+          "mode": "name"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "place_id",
+              "lookupValue": "={{ $json.place_id }}"
+            }
+          ]
+        },
+        "options": {
+          "returnAllMatches": false
+        }
+      },
+      "id": "1a000000-0000-0000-0000-000000000007",
+      "name": "Dedup \u2014 Sheet Lookup",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -400,
+        400
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "{{YOUR_CREDENTIAL_ID}}",
+          "name": "YOUR_GOOGLESHEETSOAUTH2API_CREDENTIAL"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "dedup-cond-1",
+              "leftValue": "={{ $json.place_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "dedup-cond-2",
+              "leftValue": "={{ $('Dedup \u2014 Sheet Lookup').item.json.place_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "1a000000-0000-0000-0000-000000000008",
+      "name": "IF New Lead",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -200,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.website }}",
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true,
+              "maxRedirects": 5
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text"
+            }
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (compatible; LeadIntelBot/1.0)"
+            }
+          ]
+        }
+      },
+      "id": "1a000000-0000-0000-0000-000000000009",
+      "name": "Fetch Website (best-effort)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        300
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "jsCode": "// Detect booking-tool tech stack from website HTML.\n// Strong signal: if they already use Calendly/Square/Booksy/Vagaro, they understand automation \u2014\n// pitch is integration, not greenfield. If they use NONE, that's the cold opportunity.\nconst html = ($input.first().json.body || $input.first().json.data || '').toString().toLowerCase();\nconst lead = $('IF New Lead').item.json;\n\nconst signals = {\n  has_calendly:    /calendly\\.com/.test(html),\n  has_square:      /squareup\\.com|square\\.site|squarespace-scheduling|acuityscheduling/.test(html),\n  has_booksy:      /booksy\\.com/.test(html),\n  has_vagaro:      /vagaro\\.com/.test(html),\n  has_setmore:     /setmore\\.com/.test(html),\n  has_schedulicity:/schedulicity\\.com/.test(html),\n  has_mindbody:    /mindbodyonline\\.com|mindbody\\.io/.test(html),\n  has_opentable:   /opentable\\.com/.test(html),\n  has_resy:        /resy\\.com/.test(html),\n  has_whatsapp_link:/wa\\.me\\/|api\\.whatsapp\\.com/.test(html),\n  has_chatbot_widget:/intercom|drift\\.com|tidio|tawk\\.to|crisp\\.chat|hubspot.*chat/.test(html),\n  mentions_dm_to_book: /dm\\s+to\\s+book|message\\s+to\\s+book|dm\\s+for\\s+appointment/.test(html),\n  mentions_call_to_book: /call\\s+to\\s+book|call\\s+for\\s+appointment|call\\s+to\\s+schedule/.test(html),\n  has_contact_form: /<form[^>]*>/.test(html),\n  has_phone_link:   /href=\"tel:/.test(html)\n};\n\nconst booking_tools_detected = Object.entries(signals)\n  .filter(([k, v]) => v && k.startsWith('has_') && k !== 'has_phone_link' && k !== 'has_contact_form' && k !== 'has_whatsapp_link' && k !== 'has_chatbot_widget')\n  .map(([k]) => k.replace('has_', ''));\n\n// Booking method heuristic.\nlet booking_method_detected = 'unknown';\nif (booking_tools_detected.length > 0) booking_method_detected = 'link';\nelse if (signals.has_contact_form) booking_method_detected = 'form';\nelse if (signals.mentions_call_to_book && !signals.has_contact_form) booking_method_detected = 'call';\nelse if (signals.mentions_dm_to_book) booking_method_detected = 'dm';\n\nreturn [{\n  json: {\n    ...lead,\n    website_signals: signals,\n    booking_tools_detected,\n    booking_method_detected,\n    website_fetch_status: $input.first().json.statusCode || null\n  }\n}];"
+      },
+      "id": "1a000000-0000-0000-0000-00000000000a",
+      "name": "Website Tech Detect",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"{{ $('Set Config').item.json.ANTHROPIC_MODEL }}\",\n  \"max_tokens\": 1024,\n  \"system\": \"You are a B2B lead qualification analyst evaluating small US businesses for fit with AI booking and AI receptionist automation. Output ONLY valid JSON matching the requested schema. No prose, no markdown fences. If a signal is unclear, set its sub-score conservatively and add a note to 'uncertainties'. Do not invent facts not present in the input.\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Analyze this business profile and return qualification JSON.\\n\\nBUSINESS PROFILE:\\n{{ JSON.stringify({\\n  business_name: $json.business_name,\\n  category: $json.category,\\n  city: $json.city,\\n  state: $json.state,\\n  rating: $json.rating,\\n  reviews_count: $json.reviews_count,\\n  website: $json.website,\\n  phone: $json.phone,\\n  email: $json.email,\\n  description: $json.description,\\n  categories_detected: $json.categories_detected,\\n  booking_tools_detected: $json.booking_tools_detected,\\n  booking_method_detected: $json.booking_method_detected,\\n  website_signals: $json.website_signals\\n}).replace(/\\\"/g, '\\\\\\\"') }}\\n\\nReturn EXACTLY this JSON shape:\\n{\\n  \\\"manual_communication_dependency\\\": {\\\"score\\\": 0-10, \\\"evidence\\\": [strings]},\\n  \\\"booking_friction\\\": {\\\"score\\\": 0-10, \\\"evidence\\\": [strings]},\\n  \\\"automation_gap_signals\\\": [strings],\\n  \\\"engagement_quality\\\": {\\\"score\\\": 0-10, \\\"evidence\\\": [strings]},\\n  \\\"activity_level\\\": {\\\"score\\\": 0-10, \\\"evidence\\\": [strings]},\\n  \\\"pain_points\\\": [up to 3 short strings],\\n  \\\"suggested_outreach_angle\\\": \\\"one specific sentence referencing this business\\\",\\n  \\\"uncertainties\\\": [strings],\\n  \\\"overall_fit_confidence\\\": 0.0-1.0\\n}\\n\\nScoring guidance:\\n- booking_friction high (8-10) = no online booking, must call/DM, or no website at all\\n- booking_friction low (0-3) = has Calendly/Square/Booksy/Vagaro/etc already (already automated)\\n- manual_communication_dependency high = phone-only, no chatbot, no auto-replies\\n- activity_level uses rating + reviews_count as proxies for real customer flow\\n- if booking_tools_detected is non-empty, manual_dependency should drop accordingly\\n- if reviews_count < 5, mark activity uncertain\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 60000,
+          "retry": {
+            "maxTries": 2,
+            "waitBetweenTries": 3000
+          }
+        }
+      },
+      "id": "1a000000-0000-0000-0000-00000000000b",
+      "name": "Anthropic \u2014 Qualify Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "{{YOUR_CREDENTIAL_ID}}",
+          "name": "YOUR_HTTPHEADERAUTH_CREDENTIAL"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Anthropic response, compute deterministic lead_score from sub-scores.\n// We let the LLM extract evidence; the final 1\u201310 score is computed in code\n// for consistency across runs.\nconst lead = $('Website Tech Detect').item.json;\nconst resp = $input.first().json;\n\n// Anthropic returns { content: [{ type: 'text', text: '...' }, ...] }\nlet aiText = '';\ntry {\n  aiText = (resp.content || []).filter(c => c.type === 'text').map(c => c.text).join('').trim();\n} catch (e) {\n  aiText = '';\n}\n\n// Strip accidental markdown fences if any.\naiText = aiText.replace(/^```(?:json)?\\s*/i, '').replace(/```\\s*$/i, '').trim();\n\nlet ai = null;\ntry {\n  ai = JSON.parse(aiText);\n} catch (e) {\n  // Salvage: find first { ... } block.\n  const m = aiText.match(/\\{[\\s\\S]*\\}/);\n  if (m) { try { ai = JSON.parse(m[0]); } catch (_) {} }\n}\n\n// Fallback if AI failed.\nif (!ai) {\n  return [{\n    json: {\n      ...lead,\n      timestamp_qualified: new Date().toISOString(),\n      lead_score: 0,\n      classification: 'LOW',\n      confidence: 0,\n      pain_points: [],\n      ai_insight_summary: 'AI qualification failed to return parseable JSON.',\n      suggested_outreach_angle: '',\n      signals_detected: [],\n      ai_raw_response: aiText.slice(0, 500),\n      qualification_failed: true,\n      notified: false,\n      status: 'new'\n    }\n  }];\n}\n\nconst safe = (v, d = 0) => (typeof v === 'number' && !Number.isNaN(v)) ? v : d;\n\nconst booking_friction       = safe(ai.booking_friction?.score);\nconst manual_dependency      = safe(ai.manual_communication_dependency?.score);\nconst engagement             = safe(ai.engagement_quality?.score);\nconst activity               = safe(ai.activity_level?.score);\nconst automation_gap_count   = Array.isArray(ai.automation_gap_signals) ? ai.automation_gap_signals.length : 0;\nconst automation_gap_score   = Math.min(10, automation_gap_count * 2.5);\n\n// Deterministic weighted score.\nconst raw_score =\n  booking_friction      * 0.35 +\n  manual_dependency     * 0.25 +\n  automation_gap_score  * 0.20 +\n  activity              * 0.15 +\n  engagement            * 0.05;\n\n// Apply confidence multiplier \u2014 uncertain qualifications get pulled toward the middle.\nconst confidence = Math.max(0, Math.min(1, safe(ai.overall_fit_confidence, 0.5)));\nconst confidence_adjusted = raw_score * (0.6 + 0.4 * confidence);\n\nconst lead_score = Math.round(Math.max(1, Math.min(10, confidence_adjusted)));\n\nconst HIGH = $('Set Config').item.json.HIGH_SCORE_THRESHOLD;\nconst MED  = $('Set Config').item.json.MEDIUM_SCORE_THRESHOLD;\n\nlet classification = 'LOW';\nif (lead_score >= HIGH) classification = 'HIGH';\nelse if (lead_score >= MED) classification = 'MEDIUM';\n\nconst signals_detected = [\n  ...(ai.automation_gap_signals || []),\n  ...Object.entries(lead.website_signals || {}).filter(([k, v]) => v).map(([k]) => `website:${k}`)\n];\n\nreturn [{\n  json: {\n    ...lead,\n    timestamp_qualified: new Date().toISOString(),\n    lead_score,\n    classification,\n    confidence,\n    pain_points: ai.pain_points || [],\n    ai_insight_summary: `Booking friction ${booking_friction}/10. Manual dependency ${manual_dependency}/10. Automation gaps: ${automation_gap_count}.`,\n    suggested_outreach_angle: ai.suggested_outreach_angle || '',\n    signals_detected,\n    ai_uncertainties: ai.uncertainties || [],\n    qualification_failed: false,\n    notified: false,\n    status: 'new'\n  }\n}];"
+      },
+      "id": "1a000000-0000-0000-0000-00000000000c",
+      "name": "Score + Classify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Set Config').item.json.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "leads",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lead_id": "={{ $json.lead_id }}",
+            "timestamp_discovered": "={{ $json.timestamp_discovered }}",
+            "timestamp_qualified": "={{ $json.timestamp_qualified }}",
+            "source": "={{ $json.source }}",
+            "category": "={{ $json.category }}",
+            "business_name": "={{ $json.business_name }}",
+            "website": "={{ $json.website }}",
+            "phone": "={{ $json.phone }}",
+            "email": "={{ $json.email }}",
+            "address": "={{ $json.address }}",
+            "city": "={{ $json.city }}",
+            "state": "={{ $json.state }}",
+            "rating": "={{ $json.rating }}",
+            "reviews_count": "={{ $json.reviews_count }}",
+            "google_maps_url": "={{ $json.google_maps_url }}",
+            "place_id": "={{ $json.place_id }}",
+            "booking_method_detected": "={{ $json.booking_method_detected }}",
+            "booking_tools_detected": "={{ JSON.stringify($json.booking_tools_detected || []) }}",
+            "lead_score": "={{ $json.lead_score }}",
+            "classification": "={{ $json.classification }}",
+            "confidence": "={{ $json.confidence }}",
+            "pain_points": "={{ JSON.stringify($json.pain_points || []) }}",
+            "ai_insight_summary": "={{ $json.ai_insight_summary }}",
+            "suggested_outreach_angle": "={{ $json.suggested_outreach_angle }}",
+            "signals_detected": "={{ JSON.stringify($json.signals_detected || []) }}",
+            "notified": "={{ $json.notified }}",
+            "status": "={{ $json.status }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "lead_id",
+              "displayName": "lead_id",
+              "type": "string"
+            },
+            {
+              "id": "timestamp_discovered",
+              "displayName": "timestamp_discovered",
+              "type": "string"
+            },
+            {
+              "id": "timestamp_qualified",
+              "displayName": "timestamp_qualified",
+              "type": "string"
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "type": "string"
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "type": "string"
+            },
+            {
+              "id": "business_name",
+              "displayName": "business_name",
+              "type": "string"
+            },
+            {
+              "id": "website",
+              "displayName": "website",
+              "type": "string"
+            },
+            {
+              "id": "phone",
+              "displayName": "phone",
+              "type": "string"
+            },
+            {
+              "id": "email",
+              "displayName": "email",
+              "type": "string"
+            },
+            {
+              "id": "address",
+              "displayName": "address",
+              "type": "string"
+            },
+            {
+              "id": "city",
+              "displayName": "city",
+              "type": "string"
+            },
+            {
+              "id": "state",
+              "displayName": "state",
+              "type": "string"
+            },
+            {
+              "id": "rating",
+              "displayName": "rating",
+              "type": "number"
+            },
+            {
+              "id": "reviews_count",
+              "displayName": "reviews_count",
+              "type": "number"
+            },
+            {
+              "id": "google_maps_url",
+              "displayName": "google_maps_url",
+              "type": "string"
+            },
+            {
+              "id": "place_id",
+              "displayName": "place_id",
+              "type": "string"
+            },
+            {
+              "id": "booking_method_detected",
+              "displayName": "booking_method_detected",
+              "type": "string"
+            },
+            {
+              "id": "booking_tools_detected",
+              "displayName": "booking_tools_detected",
+              "type": "string"
+            },
+            {
+              "id": "lead_score",
+              "displayName": "lead_score",
+              "type": "number"
+            },
+            {
+              "id": "classification",
+              "displayName": "classification",
+              "type": "string"
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "type": "number"
+            },
+            {
+              "id": "pain_points",
+              "displayName": "pain_points",
+              "type": "string"
+            },
+            {
+              "id": "ai_insight_summary",
+              "displayName": "ai_insight_summary",
+              "type": "string"
+            },
+            {
+              "id": "suggested_outreach_angle",
+              "displayName": "suggested_outreach_angle",
+              "type": "string"
+            },
+            {
+              "id": "signals_detected",
+              "displayName": "signals_detected",
+              "type": "string"
+            },
+            {
+              "id": "notified",
+              "displayName": "notified",
+              "type": "boolean"
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1a000000-0000-0000-0000-00000000000d",
+      "name": "Append to Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        800,
+        300
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "{{YOUR_CREDENTIAL_ID}}",
+          "name": "YOUR_GOOGLESHEETSOAUTH2API_CREDENTIAL"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "high-cond-1",
+              "leftValue": "={{ $json.classification }}",
+              "rightValue": "HIGH",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "1a000000-0000-0000-0000-00000000000e",
+      "name": "IF High Value",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Set Config').item.json.TELEGRAM_CHAT_ID }}",
+        "text": "=\ud83c\udfaf *New High-Value Lead*\n\n*Business:* {{ $json.business_name }}\n*Category:* {{ $json.category }}\n*Location:* {{ $json.city }}, {{ $json.state }}\n*Lead Score:* {{ $json.lead_score }}/10  (confidence {{ ($json.confidence * 100).toFixed(0) }}%)\n\n*Pain Points:*\n{{ ($json.pain_points || []).map(p => '\u2022 ' + p).join('\\n') }}\n\n*Booking Method:* {{ $json.booking_method_detected }}\n*Existing Tools:* {{ ($json.booking_tools_detected || []).join(', ') || 'none detected' }}\n\n*Website:* {{ $json.website || 'none' }}\n*Phone:* {{ $json.phone || 'n/a' }}\n*Maps:* {{ $json.google_maps_url }}\n\n*Outreach Angle:*\n_{{ $json.suggested_outreach_angle }}_",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "disable_web_page_preview": true
+        }
+      },
+      "id": "1a000000-0000-0000-0000-00000000000f",
+      "name": "Telegram \u2014 High Value Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "{{YOUR_CREDENTIAL_ID}}",
+          "name": "YOUR_TELEGRAMAPI_CREDENTIAL"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "amount": 4,
+        "unit": "seconds"
+      },
+      "id": "1a000000-0000-0000-0000-000000000010",
+      "name": "Rate Limit (4s)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        500
+      ],
+      "webhookId": "rate-limit-4s"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Error handler: log Apify failures into a 'failures' tab for later review.\nconst err = $input.first().json;\nreturn [{\n  json: {\n    timestamp: new Date().toISOString(),\n    stage: 'apify_gmaps',\n    error_message: err?.error?.message || err?.message || 'unknown error',\n    error_code: err?.error?.statusCode || err?.statusCode || null,\n    seed_query: $('Build Search Seeds').item?.json?.query || null,\n    seed_city: $('Build Search Seeds').item?.json?.city || null\n  }\n}];"
+      },
+      "id": "1a000000-0000-0000-0000-000000000011",
+      "name": "Format Apify Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -800,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('Set Config').item.json.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "failures",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {}
+      },
+      "id": "1a000000-0000-0000-0000-000000000012",
+      "name": "Log Failure",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -600,
+        600
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "{{YOUR_CREDENTIAL_ID}}",
+          "name": "YOUR_GOOGLESHEETSOAUTH2API_CREDENTIAL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle AI qualification failures the same way \u2014 log and skip.\nconst err = $input.first().json;\nconst lead = $('Website Tech Detect').item?.json || {};\nreturn [{\n  json: {\n    timestamp: new Date().toISOString(),\n    stage: 'anthropic_qualify',\n    error_message: err?.error?.message || err?.message || 'unknown error',\n    error_code: err?.error?.statusCode || err?.statusCode || null,\n    lead_id: lead.lead_id || null,\n    business_name: lead.business_name || null\n  }\n}];"
+      },
+      "id": "1a000000-0000-0000-0000-000000000013",
+      "name": "Format AI Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "Daily Trigger 09:00": {
+      "main": [
+        [
+          {
+            "node": "Set Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Config": {
+      "main": [
+        [
+          {
+            "node": "Build Search Seeds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Search Seeds": {
+      "main": [
+        [
+          {
+            "node": "Apify \u2014 Google Maps Scrape",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify \u2014 Google Maps Scrape": {
+      "main": [
+        [
+          {
+            "node": "Tag + Split Maps Results",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Apify Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Apify Error": {
+      "main": [
+        [
+          {
+            "node": "Log Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tag + Split Maps Results": {
+      "main": [
+        [
+          {
+            "node": "Normalize \u2192 Lead Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize \u2192 Lead Schema": {
+      "main": [
+        [
+          {
+            "node": "Dedup \u2014 Sheet Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup \u2014 Sheet Lookup": {
+      "main": [
+        [
+          {
+            "node": "IF New Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF New Lead": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit (4s)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Rate Limit (4s)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Website (best-effort)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Website (best-effort)": {
+      "main": [
+        [
+          {
+            "node": "Website Tech Detect",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Website Tech Detect": {
+      "main": [
+        [
+          {
+            "node": "Anthropic \u2014 Qualify Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic \u2014 Qualify Lead": {
+      "main": [
+        [
+          {
+            "node": "Score + Classify",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format AI Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format AI Error": {
+      "main": [
+        [
+          {
+            "node": "Log Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score + Classify": {
+      "main": [
+        [
+          {
+            "node": "Append to Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append to Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "IF High Value",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF High Value": {
+      "main": [
+        [
+          {
+            "node": "Telegram \u2014 High Value Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "executionTimeout": 3600,
+    "timezone": "America/New_York"
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "name": "lead-intelligence",
+      "createdAt": "2026-05-10T00:00:00.000Z"
+    }
+  ],
+  "id": "{{generated_on_import}}"
+}
